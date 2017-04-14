@@ -1,0 +1,126 @@
+#!/usr/bin/python
+from gpiozero import Button
+from signal import pause
+import boto3
+import logging
+import socket
+from logging.handlers import SysLogHandler
+from threading import Thread
+import threading
+
+#kickoff awstread
+global lastMessage
+lastState = open('/home/pi/pialarm/lastmessage', 'r')
+lastMessage = lastState.read()
+lastState.close()
+
+def awsLambdaMessage():
+        #print "Starting Messaging Thread"
+        import paho.mqtt.client as paho
+        import os
+        import socket
+        import ssl
+        import json
+        def on_connect(client, userdata, flags, rc):
+                #print("Connection returned result: " + str(rc) )
+                # Subscribing in on_connect() means that if we lose the connection and
+                # reconnect then subscriptions will be renewed.
+                client.subscribe("pialarm" , 1 )
+        def on_message(client, userdata, msg):
+                #print("topic: "+msg.topic)
+                print("payload: "+str(msg.payload))
+                global lastMessage
+                lastMessage = str(msg.payload)
+                file = open("/home/pi/pialarm/lastmessage", "w+")
+                file.write(lastMessage)
+                file.close()
+
+        mqttc = paho.Client()
+        mqttc.on_connect = on_connect
+        mqttc.on_message = on_message
+
+        awshost = "XXXXX"
+        awsport = 8883
+        clientId = "pialarm"
+        thingName = "pialarm"
+        caPath = "/home/pi/awsiot/root-CA.crt"
+        certPath = "/home/pi/awsiot/pialarm.cert.pem"
+        keyPath = "/home/pi/awsiot/pialarm.private.key"
+
+        mqttc.tls_set(caPath, certfile=certPath, keyfile=keyPath, cert_reqs=ssl.CERT_REQUIRED, tls_version=ssl.PROTOCOL_TLSv1_2, ciphers=None)
+
+        mqttc.connect(awshost, awsport, keepalive=60)
+
+        mqttc.loop_forever()
+echoListener = Thread(target=awsLambdaMessage)
+echoListener.start()
+print threading.activeCount()
+print threading.enumerate()
+
+class ContextFilter(logging.Filter):
+  hostname = socket.gethostname()
+
+  def filter(self, record):
+    record.hostname = ContextFilter.hostname
+    return True
+
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
+
+f = ContextFilter()
+logger.addFilter(f)
+
+syslog = SysLogHandler(address=('elk.home.mab', 514))
+formatter = logging.Formatter('%(asctime)s alarm.home.mab homealarm: %(message)s', datefmt='%b %d %H:%M:%S')
+
+syslog.setFormatter(formatter)
+logger.addHandler(syslog)
+
+def playAlert(file, loops=1):
+	import pygame
+	print "playing "+file
+	pygame.mixer.init()
+	pygame.mixer.music.load(file)
+	pygame.mixer.music.play(loops)
+	while pygame.mixer.music.get_busy() == True:
+    		continue
+
+
+def doorOpen(door, alert=False):
+	print lastMessage
+	print door+" opened"
+	logger.info(door+" opened")
+	if lastMessage == "armAll" or (lastMessage == "armBasement" and door == "basement_door"):
+	        sendMessage("ALERT: "+door+" opened")
+		playAlert("alarm.wav", 3)
+	elif door == "basement_door":
+		sendMessage("ALERT: "+door+" opened")
+	if lastMessage == "armDoorChime":
+		playAlert("chime.wav")
+   
+def doorClose(door, alert=False):
+	print lastMessage
+	print door+" closed"
+        logger.info(door+" closed")
+
+def sendMessage(message):
+	client = boto3.client('sns')
+	response = client.publish(
+    		TopicArn='arn:aws:sns:us-east-1:XXXXX:alarm',    
+    		Message=message
+	)
+	#print("Response: {}".format(response))	
+
+
+sliding_door = Button(2)
+front_door = Button(3)
+basement_door = Button(4)
+#when_pressed it is closed, open on release
+sliding_door.when_pressed = lambda: doorClose("sliding_door") 
+sliding_door.when_released = lambda: doorOpen("sliding_door")
+front_door.when_pressed = lambda: doorClose("front_door")
+front_door.when_released = lambda: doorOpen("front_door")
+basement_door.when_pressed = lambda: doorClose("basement_door")
+basement_door.when_released = lambda: doorOpen("basement_door")
+
+pause()
